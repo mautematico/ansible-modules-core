@@ -302,6 +302,12 @@ def path_check(path):
     else:
         return False
 
+def upload_s3file_or_string(module, s3, bucket, obj, src, string, expiry, metadata, encrypt, headers):
+    if string is None:
+        upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers)
+    else:
+        upload_s3string(module, s3, bucket, obj, string, expiry, metadata, encrypt, headers)
+
 
 def upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers):
     try:
@@ -312,6 +318,23 @@ def upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, heade
                 key.set_metadata(meta_key, metadata[meta_key])
 
         key.set_contents_from_filename(src, encrypt_key=encrypt, headers=headers)
+        for acl in module.params.get('permission'):
+            key.set_acl(acl)
+        url = key.generate_url(expiry)
+        module.exit_json(msg="PUT operation complete", url=url, changed=True)
+    except s3.provider.storage_copy_error as e:
+        module.fail_json(msg= str(e))
+
+def upload_s3string(module, s3, bucket, obj, string, expiry, metadata, encrypt, headers):
+    try:
+        bucket = s3.lookup(bucket)
+        key = bucket.new_key(obj)
+        if metadata:
+            for meta_key in metadata.keys():
+                key.set_metadata(meta_key, metadata[meta_key])
+
+        #   http://boto.cloudhackers.com/en/latest/ref/s3.html#boto.s3.key.Key.set_contents_from_string
+        key.set_contents_from_string(string, encrypt_key=encrypt, headers=headers)
         for acl in module.params.get('permission'):
             key.set_acl(acl)
         url = key.generate_url(expiry)
@@ -394,6 +417,7 @@ def main():
             s3_url         = dict(aliases=['S3_URL']),
             rgw            = dict(default='no', type='bool'),
             src            = dict(),
+            string         = dict(type='str', aliases=['content', 'contents']),
         ),
     )
     module = AnsibleModule(argument_spec=argument_spec)
@@ -548,8 +572,8 @@ def main():
 
         # Lets check the src path.
         pathrtn = path_check(src)
-        if pathrtn is False:
-            module.fail_json(msg="Local object for PUT does not exist", failed=True)
+        if pathrtn is False and string is None:
+            module.fail_json(msg="Local object for PUT does not exist, and content string parameter is missing.", failed=True)
 
         # Lets check to see if bucket exists to get ground truth.
         bucketrtn = bucket_check(module, s3, bucket)
@@ -564,24 +588,24 @@ def main():
                 if md5_local == md5_remote:
                     sum_matches = True
                     if overwrite == 'always':
-                        upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers)
+                        upload_s3file_or_string(module, s3, bucket, obj, src, string, expiry, metadata, encrypt, headers)
                     else:
                         get_download_url(module, s3, bucket, obj, expiry, changed=False)
                 else:
                     sum_matches = False
                     if overwrite in ('always', 'different'):
-                        upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers)
+                        upload_s3file_or_string(module, s3, bucket, obj, src, string, expiry, metadata, encrypt, headers)
                     else:
                         module.exit_json(msg="WARNING: Checksums do not match. Use overwrite parameter to force upload.")
 
         # If neither exist (based on bucket existence), we can create both.
         if bucketrtn is False and pathrtn is True:
             create_bucket(module, s3, bucket, location)
-            upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers)
+            upload_s3file_or_string(module, s3, bucket, obj, src, string, expiry, metadata, encrypt, headers)
 
         # If bucket exists but key doesn't, just upload.
         if bucketrtn is True and pathrtn is True and keyrtn is False:
-            upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers)
+            upload_s3file_or_string(module, s3, bucket, obj, src, string, expiry, metadata, encrypt, headers)
 
     # Delete an object from a bucket, not the entire bucket
     if mode == 'delobj':
